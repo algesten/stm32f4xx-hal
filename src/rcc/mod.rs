@@ -43,6 +43,7 @@
 use crate::pac::rcc::cfgr::{HPRE_A, SW_A};
 use crate::pac::{self, rcc, RCC};
 
+use defmt::{debug, info};
 use fugit::HertzU32 as Hertz;
 use fugit::RateExtU32;
 
@@ -423,6 +424,335 @@ pub struct CFGR {
 }
 
 impl CFGR {
+    pub fn freeze_manual(
+        self,
+        hse: Option<Hertz>,
+        // 000000: PLLM = 0, wrong configuration
+        // 000001: PLLM = 1, wrong configuration
+        // 000010: PLLM = 2
+        // 000011: PLLM = 3
+        // 000100: PLLM = 4
+        // ...
+        // 111110: PLLM = 62
+        // 111111: PLLM = 63
+        pllm: u32,
+        // 000000000: PLLN = 0, wrong configuration
+        // 000000001: PLLN = 1, wrong configuration
+        // ...
+        // 000110010: PLLN = 50
+        // ...
+        // 001100011: PLLN = 99
+        // 001100100: PLLN = 100
+        // ...
+        // 110110000: PLLN = 432
+        // 110110001: PLLN = 433, wrong configuration
+        // ...
+        // 111111111: PLLN = 511, wrong configuration
+        plln: u32,
+        // 00: PLLP = 2
+        // 01: PLLP = 4
+        // 10: PLLP = 6
+        // 11: PLLP = 8
+        pllp: u32,
+        // 0000: PLLQ = 0, wrong configuration
+        // 0001: PLLQ = 1, wrong configuration
+        // 0010: PLLQ = 2
+        // 0011: PLLQ = 3
+        // 0100: PLLQ = 4
+        // ...
+        // 1111: PLLQ = 15
+        pllq: u32,
+        // 000: PLLR = 0, wrong configuration
+        // 001: PLLR = 1, wrong configuration
+        // 010: PLLR = 2
+        // 011: PLLR = 3
+        // ...
+        // 111: PLLR = 7
+        pllr: u32,
+
+        // ---------------
+        // 000000: PLLI2SM = 0, wrong configuration
+        // 000001: PLLI2SM = 1, wrong configuration...
+        // 000010: PLLI2SM = 2
+        // 000011: PLLI2SM = 3
+        // 000100: PLLI2SM = 4
+        // .......
+        // 111110: PLLI2SM = 62
+        // 111111: PLLI2SM = 63
+        plli2sm: u32,
+        // 000000000: PLLI2SN = 0, wrong configuration
+        // 000000001: PLLI2SN = 1, wrong configuration
+        // ...
+        // 001100010: PLLI2SN = 50
+        // ...
+        // 001100011: PLLI2SN = 99
+        // 001100100: PLLI2SN = 100
+        // 001100101: PLLI2SN = 101
+        // 001100110: PLLI2SN = 102
+        // ...
+        // 110110000: PLLI2SN = 432
+        // 110110000: PLLI2SN = 433, wrong configuration
+        // ...
+        // 111111111: PLLI2SN = 511, wrong configuration
+        plli2sn: u32,
+        // 0000: PLLI2SQ = 0, wrong configuration
+        // 0001: PLLI2SQ = 1, wrong configuration
+        // 0010: PLLI2SQ = 2
+        // 0011: PLLI2SQ = 3
+        // 0100: PLLI2SQ = 4
+        // 0101: PLLI2SQ = 5
+        // ...
+        // 1111: PLLI2SQ = 15
+        plli2sq: u32,
+        // 000: PLLR = 0, wrong configuration
+        // 001: PLLR = 1, wrong configuration
+        // 010: PLLR = 2
+        // ...
+        // 111: PLLR = 7
+        plli2sr: u32,
+
+        // ----------------
+        // 0xxx: system clock not divided
+        // 1000: system clock divided by 2
+        // 1001: system clock divided by 4
+        // 1010: system clock divided by 8
+        // 1011: system clock divided by 16
+        // 1100: system clock divided by 64
+        // 1101: system clock divided by 128
+        // 1110: system clock divided by 256
+        // 1111: system clock divided by 512
+        hpre: u8,
+        // 0xx: no division
+        // 100: division by 2
+        // 101: division by 3
+        // 110: division by 4
+        // 111: division by 5
+        ppre1: u8,
+        // 0xx: no division
+        // 100: division by 2
+        // 101: division by 3
+        // 110: division by 4
+        // 111: division by 5
+        ppre2: u8,
+    ) -> Clocks {
+        use crate::pac::FLASH;
+        use crate::pac::PWR;
+
+        let rcc = unsafe { &*RCC::ptr() };
+        let flash = unsafe { &*FLASH::ptr() };
+        let pwr = unsafe { &*PWR::ptr() };
+
+        // These bits can be modified only when the PLL is OFF. The new value programmed is active
+        // only when the PLL is ON. When the PLL is OFF, the voltage regulator is set to scale 3
+        // independently of the VOS register content.
+        // 00: Reserved (Scale 3 mode selected)
+        // 01: Scale 3 mode <= 64 MHz
+        // 10: Scale 2 mode (reset value) <= 84 MHz
+        // 11: Scale 1 mode <= 100 MHz
+        // info!("Set voltage scaling output selection");
+        // pwr.cr.modify(|_, w| unsafe { w.vos().bits(0b11) });
+
+        let use_hse = hse.is_some();
+
+        // Disable PLL (regular and I2S)
+        info!("Disable PLL");
+        rcc.cr.modify(|_, w| w.pllon().clear_bit());
+        rcc.cr.modify(|_, w| w.plli2son().clear_bit());
+
+        // Wait for PLL to turn off
+        while rcc.cr.read().pllrdy().bit_is_set() {}
+        while rcc.cr.read().plli2srdy().bit_is_set() {}
+
+        flash.acr.modify(|_, w| {
+            // Enable prefetch
+            w.prften().set_bit();
+            // Enable instruction cache
+            w.icen().set_bit();
+            // Enable data cache.
+            w.dcen().set_bit()
+        });
+
+        if use_hse {
+            // enable HSE and wait for it to be ready
+            rcc.cr.modify(|_, w| {
+                w.hsebyp().clear_bit();
+                w.hseon().set_bit()
+            });
+            info!("Wait for HSE");
+            while rcc.cr.read().hserdy().bit_is_clear() {}
+        } else {
+            // Turn on HSI.
+            rcc.cr.modify(|_, w| w.hsion().set_bit());
+            while rcc.cr.read().hsirdy().bit_is_clear() {}
+        }
+
+        // Set AHB prescaler to a safe value so PLL won't cause HCLK to go over 100MHz
+        rcc.cfgr.modify(|_, w| unsafe {
+            w.hpre().bits(0b1010);
+            w.ppre1().bits(0b110);
+            w.ppre2().bits(0b110)
+        });
+
+        // Wait for the new prescalers to kick in
+        // "The clocks are divided with the new prescaler factor from 1 to 16 AHB cycles after write"
+        cortex_m::asm::delay(16);
+
+        rcc.pllcfgr.modify(|_, w| unsafe {
+            w.pllm().bits(pllm as u8);
+            w.plln().bits(plln as u16);
+            w.pllp().bits(pllp as u8);
+            w.pllq().bits(pllq as u8);
+            w.pllr().bits(pllr as u8);
+
+            // 0 - hsi, 1 - hse
+            w.pllsrc().bit(use_hse)
+        });
+
+        rcc.plli2scfgr.modify(|_, w| unsafe {
+            w.plli2sm().bits(plli2sm as u8);
+            w.plli2sn().bits(plli2sn as u16);
+            w.plli2sq().bits(plli2sq as u8);
+            w.plli2sr().bits(plli2sr as u8);
+
+            // 0 - use same as PLL, 1 - CK_I2S_EXT
+            w.plli2ssrc().bit(false)
+        });
+
+        // Enable PLL
+        info!("Enable PLL");
+        rcc.cr.modify(|_, w| w.pllon().set_bit());
+        rcc.cr.modify(|_, w| w.plli2son().set_bit());
+
+        cortex_m::asm::delay(100);
+
+        // Wait for PLL to stabilize
+        info!("Wait for PLL");
+        while rcc.cr.read().pllrdy().bit_is_clear() {}
+        info!("Wait for PLLI2S");
+        while rcc.cr.read().plli2srdy().bit_is_clear() {}
+
+        let pll_src_mux = hse.unwrap_or(16.MHz());
+        let pllm_clk = pll_src_mux.raw() / pllm;
+        let plln_clk = pllm_clk * plln;
+        let pllp_clk = plln_clk
+            / match pllp {
+                0b00 => 2,
+                0b01 => 4,
+                0b10 => 6,
+                0b11 => 8,
+                _ => unreachable!(),
+            };
+        let pllq_clk = plln_clk / pllq;
+        let pllr_clk = plln_clk / pllr;
+
+        info!(
+            "pllm: {} plln: {} pllp: {} pllq: {} pllr: {}",
+            pllm_clk, plln_clk, pllp_clk, pllq_clk, pllr_clk
+        );
+
+        let plli2s_src_mux = pll_src_mux;
+        let plli2sm_clk = plli2s_src_mux.raw() / plli2sm;
+        let plli2sn_clk = plli2sm_clk * plli2sn;
+        let plli2sq_clk = plli2sn_clk / plli2sq;
+        let plli2sr_clk = plli2sn_clk / plli2sr;
+
+        info!(
+            "plli2sm: {} plli2sn: {} plli2sq: {} plli2sr: {}",
+            plli2sm_clk, plli2sn_clk, plli2sq_clk, plli2sr_clk
+        );
+
+        let sysclk = pllp_clk;
+
+        // Adjust flash wait states
+        flash.acr.modify(|_, w| {
+            // To correctly read data from Flash memory, the number of wait states (LATENCY) must be
+            // correctly programmed in the Flash access control register (FLASH_ACR) according to the
+            // frequency of the CPU clock (HCLK) and the supply voltage of the device
+            //
+            // In the voltage range 2.7V-3.6V and HCLK 90 < HCLK ≤ 100, we get 3 WS (4 CPU cycles)
+            w.latency().bits(3)
+        });
+
+        // // Enable I2S PLL.
+        // rcc.cr.modify(|_, w| w.plli2son().set_bit());
+
+        // Modify which clocks goes to the I2S1/I2S2
+        rcc.dckcfgr.modify(|_, w| {
+            w.i2s1src().plli2sr();
+            w.i2s2src().plli2sr()
+        });
+
+        // Select system clock source
+        info!("Select system clock source");
+        rcc.cfgr.modify(|_, w| w.sw().pll());
+
+        let vos = pwr.cr.read().vos().bits();
+        info!("VOS: {}", vos);
+
+        // Set AHB/APB1/APB2 prescalers
+        rcc.cfgr.modify(|_, w| unsafe {
+            w.hpre().bits(hpre as u8);
+            w.ppre1().bits(ppre1 as u8);
+            w.ppre2().bits(ppre2 as u8)
+        });
+
+        // Wait for the new prescalers to kick in
+        // "The clocks are divided with the new prescaler factor from 1 to 16 AHB cycles after write"
+        cortex_m::asm::delay(16);
+
+        info!("Wait for system clock source");
+        while !rcc.cfgr.read().sws().is_pll() {}
+
+        let hclk = sysclk
+            / match hpre {
+                0b0000 => 1,
+                0b1000 => 2,
+                0b1001 => 4,
+                0b1010 => 8,
+                0b1011 => 16,
+                0b1100 => 64,
+                0b1101 => 128,
+                0b1110 => 256,
+                0b1111 => 512,
+                _ => unreachable!(),
+            };
+
+        fn pclk_div(x: u8) -> u32 {
+            match x {
+                0b000 => 1,
+                0b100 => 2,
+                0b101 => 3,
+                0b110 => 4,
+                0b111 => 5,
+                _ => unreachable!(),
+            }
+        }
+
+        let ppre1_div = pclk_div(ppre1);
+        let ppre2_div = pclk_div(ppre2);
+
+        let pclk1 = hclk / ppre1_div;
+        let pclk2 = hclk / ppre2_div;
+
+        let pclk_mul1 = if ppre1_div == 1 { 1 } else { 2 };
+        let pclk_mul2 = if ppre2_div == 1 { 1 } else { 2 };
+
+        let timclk1 = Hertz::from_raw(pclk1 * pclk_mul1);
+        let timclk2 = Hertz::from_raw(pclk2 * pclk_mul2);
+
+        Clocks {
+            hclk: hclk.Hz(),
+            pclk1: pclk1.Hz(),
+            pclk2: pclk2.Hz(),
+            timclk1,
+            timclk2,
+            sysclk: sysclk.Hz(),
+            pll48clk: None,
+            i2s_apb1_clk: Some(plli2sr_clk.Hz()),
+            i2s_apb2_clk: Some(plli2sr_clk.Hz()),
+        }
+    }
+
     /// Uses HSE (external oscillator) instead of HSI (internal RC oscillator) as the clock source.
     /// Will result in a hang if an external oscillator is not connected or it fails to start.
     pub fn use_hse(mut self, freq: Hertz) -> Self {
@@ -808,6 +1138,8 @@ impl CFGR {
             _ => (HPRE_A::Div512, 512),
         };
 
+        debug!("hpre_div: {}", hpre_div);
+
         // Calculate real AHB clock
         let hclk = sysclk / hpre_div;
 
@@ -822,6 +1154,8 @@ impl CFGR {
             6..=11 => (0b110, 8),
             _ => (0b111, 16),
         };
+
+        debug!("ppre1: {}", ppre1);
 
         // Calculate real APB1 clock
         let pclk1 = hclk / u32::from(ppre1);
@@ -844,6 +1178,8 @@ impl CFGR {
         let pclk2 = hclk / u32::from(ppre2);
 
         assert!(unchecked || pclk2 <= PCLK2_MAX);
+
+        debug!("ppre2: {}", ppre2);
 
         Self::flash_setup(sysclk);
 
@@ -881,6 +1217,8 @@ impl CFGR {
             // Wait for PLL to stabilise
             while rcc.cr.read().pllrdy().bit_is_clear() {}
         }
+
+        debug!("plls: {:?}", plls);
 
         #[cfg(not(feature = "gpio-f410"))]
         if plls.use_i2spll {

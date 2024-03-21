@@ -1,3 +1,5 @@
+use defmt::info;
+
 use crate::pac::RCC;
 
 pub struct MainPll {
@@ -80,7 +82,14 @@ impl MainPll {
         let pllp = (sysclk_div / 2) - 1;
 
         let pllq = (vco_in * plln + 47_999_999) / 48_000_000;
+
         let real_pll48clk = vco_in * plln / pllq;
+        let real_pllsysclk = vco_in * plln / sysclk_div;
+
+        info!(
+            "pllm: {} plln: {} pllp: {} pllq: {}",
+            pllm, plln, pllp, pllq
+        );
 
         unsafe { &*RCC::ptr() }.pllcfgr.write(|w| unsafe {
             w.pllm().bits(pllm as u8);
@@ -89,8 +98,6 @@ impl MainPll {
             w.pllq().bits(pllq as u8);
             w.pllsrc().bit(use_hse)
         });
-
-        let real_pllsysclk = vco_in * plln / sysclk_div;
 
         MainPll {
             use_pll: true,
